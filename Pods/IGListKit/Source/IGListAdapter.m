@@ -19,6 +19,7 @@
 @implementation IGListAdapter {
     NSMapTable<UICollectionViewCell *, IGListSectionController<IGListSectionType> *> *_cellSectionControllerMap;
     BOOL _isDequeuingCell;
+    BOOL _isSendingWorkingRangeDisplayUpdates;
 }
 
 - (void)dealloc {
@@ -35,7 +36,7 @@
 
 - (instancetype)initWithUpdater:(id <IGListUpdatingDelegate>)updatingDelegate
                  viewController:(UIViewController *)viewController
-               workingRangeSize:(NSUInteger)workingRangeSize {
+               workingRangeSize:(NSInteger)workingRangeSize {
     IGAssertMainThread();
     IGParameterAssert(updatingDelegate);
 
@@ -140,6 +141,7 @@
 - (void)scrollToObject:(id)object
     supplementaryKinds:(NSArray<NSString *> *)supplementaryKinds
        scrollDirection:(UICollectionViewScrollDirection)scrollDirection
+        scrollPosition:(UICollectionViewScrollPosition)scrollPosition
               animated:(BOOL)animated {
     IGAssertMainThread();
     IGParameterAssert(object != nil);
@@ -165,33 +167,72 @@
     NSIndexPath *indexPath = [NSIndexPath indexPathForItem:0 inSection:section];
     NSArray *attributes = [self layoutAttributesForIndexPath:indexPath supplementaryKinds:supplementaryKinds];
 
-    CGFloat offset = 0.0;
+    CGFloat offsetMin = 0.0;
+    CGFloat offsetMax = 0.0;
     for (UICollectionViewLayoutAttributes *attribute in attributes) {
         const CGRect frame = attribute.frame;
-        CGFloat origin;
+        CGFloat originMin;
+        CGFloat endMax;
         switch (scrollDirection) {
             case UICollectionViewScrollDirectionHorizontal:
-                origin = CGRectGetMinX(frame);
+                originMin = CGRectGetMinX(frame);
+                endMax = CGRectGetMaxX(frame);
                 break;
             case UICollectionViewScrollDirectionVertical:
-                origin = CGRectGetMinY(frame);
+                originMin = CGRectGetMinY(frame);
+                endMax = CGRectGetMaxY(frame);
                 break;
         }
 
         // find the minimum origin value of all the layout attributes
-        if (attribute == attributes.firstObject || origin < offset) {
-            offset = origin;
+        if (attribute == attributes.firstObject || originMin < offsetMin) {
+            offsetMin = originMin;
+        }
+        // find the maximum end value of all the layout attributes
+        if (attribute == attributes.firstObject || endMax > offsetMax) {
+            offsetMax = endMax;
         }
     }
-
+    
+    const CGFloat offsetMid = (offsetMin + offsetMax) / 2.0;
+    const CGFloat collectionViewWidth = collectionView.bounds.size.width;
+    const CGFloat collectionViewHeight = collectionView.bounds.size.height;
     const UIEdgeInsets contentInset = collectionView.contentInset;
     CGPoint contentOffset = collectionView.contentOffset;
     switch (scrollDirection) {
         case UICollectionViewScrollDirectionHorizontal:
-            contentOffset.x = offset - contentInset.left;
+            switch (scrollPosition) {
+                case UICollectionViewScrollPositionRight:
+                    contentOffset.x = offsetMax - collectionViewWidth - contentInset.left;
+                    break;
+                case UICollectionViewScrollPositionCenteredHorizontally:
+                    contentOffset.x = offsetMid - collectionViewWidth / 2.0 - contentInset.left;
+                    break;
+                case UICollectionViewScrollPositionLeft:
+                case UICollectionViewScrollPositionNone:
+                case UICollectionViewScrollPositionTop:
+                case UICollectionViewScrollPositionBottom:
+                case UICollectionViewScrollPositionCenteredVertically:
+                    contentOffset.x = offsetMin - contentInset.left;
+                    break;
+            }
             break;
         case UICollectionViewScrollDirectionVertical:
-            contentOffset.y = offset - contentInset.top;
+            switch (scrollPosition) {
+                case UICollectionViewScrollPositionBottom:
+                    contentOffset.y = offsetMax - collectionViewHeight - contentInset.top;
+                    break;
+                case UICollectionViewScrollPositionCenteredVertically:
+                    contentOffset.y = offsetMid - collectionViewHeight / 2.0 - contentInset.top;
+                    break;
+                case UICollectionViewScrollPositionTop:
+                case UICollectionViewScrollPositionNone:
+                case UICollectionViewScrollPositionLeft:
+                case UICollectionViewScrollPositionRight:
+                case UICollectionViewScrollPositionCenteredHorizontally:
+                    contentOffset.y = offsetMin - contentInset.top;
+                    break;
+            }
             break;
     }
 
@@ -270,8 +311,11 @@
 
     for (id object in objects) {
         // look up the item using the map's lookup function. might not be the same item
-        NSUInteger section = [map sectionForObject:object];
-        IGAssert(section != NSNotFound, @"Did not find a section for item %@", object);
+        const NSInteger section = [map sectionForObject:object];
+        const BOOL notFound = section == NSNotFound;
+        if (notFound) {
+            continue;
+        }
         [sections addIndex:section];
 
         // reverse lookup the item using the section. if the pointer has changed the trigger update events and swap items
@@ -290,7 +334,7 @@
 
 #pragma mark - List Items & Sections
 
-- (NSUInteger)sectionForSectionController:(IGListSectionController <IGListSectionType> *)sectionController {
+- (NSInteger)sectionForSectionController:(IGListSectionController <IGListSectionType> *)sectionController {
     IGAssertMainThread();
     IGParameterAssert(sectionController != nil);
 
@@ -304,13 +348,21 @@
     return [self.sectionMap sectionControllerForObject:object];
 }
 
-- (id)objectAtSection:(NSUInteger)section {
+- (id)objectForSectionController:(IGListSectionController <IGListSectionType> *)sectionController {
+    IGAssertMainThread();
+    IGParameterAssert(sectionController != nil);
+    
+    const NSUInteger section = [self.sectionMap sectionForSectionController:sectionController];
+    return [self.sectionMap objectForSection:section];
+}
+
+- (id)objectAtSection:(NSInteger)section {
     IGAssertMainThread();
 
     return [self.sectionMap objectForSection:section];
 }
 
-- (NSUInteger)sectionForObject:(id)item {
+- (NSInteger)sectionForObject:(id)item {
     IGAssertMainThread();
     IGParameterAssert(item != nil);
 
@@ -416,7 +468,7 @@
 
         IGAssert(sectionController != nil, @"Data source <%@> cannot return a nil section controller.", self.dataSource);
         if (sectionController == nil) {
-            break;
+            continue;
         }
 
         // in case the section controller was created outside of -listAdapter:sectionControllerForObject:
@@ -605,7 +657,10 @@
 
     id object = [self.sectionMap objectForSection:indexPath.section];
     [self.displayHandler willDisplayCell:cell forListAdapter:self sectionController:sectionController object:object indexPath:indexPath];
+
+    _isSendingWorkingRangeDisplayUpdates = YES;
     [self.workingRangeHandler willDisplayItemAtIndexPath:indexPath forListAdapter:self];
+    _isSendingWorkingRangeDisplayUpdates = NO;
 }
 
 - (void)collectionView:(UICollectionView *)collectionView didEndDisplayingCell:(UICollectionViewCell *)cell forItemAtIndexPath:(NSIndexPath *)indexPath {
@@ -668,7 +723,7 @@
     return UIEdgeInsetsInsetRect(self.collectionView.bounds, self.collectionView.contentInset).size;
 }
 
-- (NSUInteger)indexForCell:(UICollectionViewCell *)cell sectionController:(nonnull IGListSectionController<IGListSectionType> *)sectionController {
+- (NSInteger)indexForCell:(UICollectionViewCell *)cell sectionController:(nonnull IGListSectionController<IGListSectionType> *)sectionController {
     IGAssertMainThread();
     IGParameterAssert(cell != nil);
     IGParameterAssert(sectionController != nil);
@@ -683,8 +738,8 @@
     IGAssertMainThread();
     IGParameterAssert(sectionController != nil);
 
-    // if this is accessed while a cell is being dequeued, just return nil
-    if (_isDequeuingCell) {
+    // if this is accessed while a cell is being dequeued or displaying working range elements, just return nil
+    if (_isDequeuingCell || _isSendingWorkingRangeDisplayUpdates) {
         return nil;
     }
 
@@ -902,6 +957,16 @@
     } completion:completion];
 }
 
+- (void)scrollToSectionController:(IGListSectionController<IGListSectionType> *)sectionController
+                          atIndex:(NSInteger)index
+                   scrollPosition:(UICollectionViewScrollPosition)scrollPosition
+                         animated:(BOOL)animated {
+    IGAssertMainThread();
+    IGParameterAssert(sectionController != nil);
+
+    NSIndexPath *indexPath = [self indexPathForSectionController:sectionController index:index];
+    [self.collectionView scrollToItemAtIndexPath:indexPath atScrollPosition:scrollPosition animated:animated];
+}
 
 #pragma mark - UICollectionViewDelegateFlowLayout
 

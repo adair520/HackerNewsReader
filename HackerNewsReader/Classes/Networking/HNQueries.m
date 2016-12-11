@@ -47,6 +47,7 @@ static HNQueries *_sharedQueries = nil;
     if (data.length == 0) {
         NSLog(@"No data found for local queries.");
         abort();
+        
     }
     NSError *error = nil;
     NSDictionary *dictionary = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
